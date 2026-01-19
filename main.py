@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from PIL import Image, ImageDraw, ImageFont
 
 # 导入三个模块
 from license_plate_detection import LicensePlateDetector
@@ -74,6 +75,58 @@ class LicensePlateSystem:
         print(f"  预处理: {'启用' if use_preprocessing else '禁用'}")
         print()
     
+    def draw_chinese_text(self, img, text, position, text_color, text_size=20):
+        """
+        使用PIL绘制中文文本 (增强版：自动寻找字体)
+        """
+        if (isinstance(img, np.ndarray)):
+            # OpenCV图片(BGR)转换为PIL图片(RGB)
+            img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img_pil)
+            
+            # --- 字体加载逻辑 ---
+            font = None
+            # 字体查找优先级列表
+            font_paths = [
+                "simhei.ttf",                 # 1. 优先找当前目录下的 simhei.ttf
+                "msyh.ttf",                   # 2. 找当前目录下的 微软雅黑
+                "font.ttf",                   # 3. 找当前目录下的 font.ttf (你可以自己改名)
+                "C:/Windows/Fonts/simhei.ttf",# 4. Windows 系统绝对路径
+                "C:/Windows/Fonts/msyh.ttf",  # 5. Windows 系统绝对路径 (微软雅黑)
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf" # 6. Linux 常见路径
+            ]
+            
+            for path in font_paths:
+                if os.path.exists(path):
+                    try:
+                        font = ImageFont.truetype(path, text_size, encoding="utf-8")
+                        break
+                    except Exception as e:
+                        continue
+            
+            # 如果没找到任何中文字体
+            if font is None:
+                # 只打印一次警告，避免刷屏
+                if not hasattr(self, '_font_warning_shown'):
+                    print("\n" + "!"*60)
+                    print("【严重警告】未找到中文字体文件！中文将无法显示。")
+                    print("请将 simhei.ttf 或 msyh.ttf 复制到 main.py 同级目录下！")
+                    print("!"*60 + "\n")
+                    self._font_warning_shown = True
+                font = ImageFont.load_default() # 回退到不支持中文的默认字体
+            # -------------------
+            
+            # 绘制文本 (stroke_width=1 给文字加个黑边，防止在浅色背景看不清)
+            try:
+                draw.text(position, text, font=font, fill=text_color, stroke_width=0)
+            except:
+                # 旧版Pillow可能不支持stroke_width
+                draw.text(position, text, font=font, fill=text_color)
+            
+            # 转换回OpenCV格式
+            return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        return img
+
     def process_single_plate(self, original_image: np.ndarray, 
                             plate_info: Dict, 
                             output_dir: str,
@@ -545,6 +598,15 @@ class LicensePlateSystem:
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True)
         
+        # === 新增：定义日志文件 ===
+        log_file_path = output_path / "detection_log.csv"
+        # 如果文件不存在，写入表头
+        if not log_file_path.exists():
+            with open(log_file_path, "w", encoding="utf-8-sig") as f:
+                f.write("时间,车牌号,类型,置信度\n")
+        print(f"日志将保存至: {log_file_path}")
+        # ========================
+        
         # 打开摄像头
         cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
@@ -604,6 +666,23 @@ class LicensePlateSystem:
                                 for i, plate_info in enumerate(plates_info):
                                     # 处理检测到的车牌
                                     result = self._process_camera_detection(frame, plate_info, i)
+                                    # === 新增：只有识别成功才保存到文件 ===
+                                    plate_text = result.get('plate_text', '未知')
+                                    if plate_text != "未知":
+                                        # 获取当前信息
+                                        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                                        p_type = result.get('plate_type', '未知')
+                                        conf = result.get('ocr_confidence', 0)
+                                        
+                                        # 1. 控制台只打印有效的
+                                        print(f"[{current_time}] 🟢 捕获车牌: {plate_text} | {p_type} | conf:{conf:.2f}")
+                                        
+                                        # 2. 写入文件 (追加模式 'a')
+                                        # 为了防止同一秒内重复写入相同车牌，可以加个简单的去重逻辑（可选）
+                                        with open(log_file_path, "a", encoding="utf-8-sig") as f:
+                                            f.write(f"{current_time},{plate_text},{p_type},{conf:.2f}\n")
+                                    # =======================================
+
                                     last_detections.append({
                                         'result': result,
                                         'frame': frame.copy(),
@@ -636,17 +715,18 @@ class LicensePlateSystem:
                     elapsed_time = time.time() - start_time
                     current_fps = frame_count / elapsed_time if elapsed_time > 0 else 0
                     
-                    # 添加统计信息
-                    cv2.putText(display_frame, f"FPS: {current_fps:.1f}", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    cv2.putText(display_frame, f"帧数: {frame_count}", (10, 60),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    cv2.putText(display_frame, f"检测次数: {detection_count}", (10, 90),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    # === 修改开始: 使用中文绘制 ===
+                    # 绘制 FPS (黄色)
+                    display_frame = self.draw_chinese_text(display_frame, f"FPS: {current_fps:.1f}", (10, 10), (255, 255, 0), 25)
+                    # 绘制 帧数 (黄色)
+                    display_frame = self.draw_chinese_text(display_frame, f"帧数: {frame_count}", (10, 40), (255, 255, 0), 25)
+                    # 绘制 检测次数 (黄色)
+                    display_frame = self.draw_chinese_text(display_frame, f"检测次数: {detection_count}", (10, 70), (255, 255, 0), 25)
                     
                     if is_paused:
-                        cv2.putText(display_frame, "已暂停", (display_frame.shape[1]//2-50, 50),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                        center_x = display_frame.shape[1] // 2 - 80
+                        display_frame = self.draw_chinese_text(display_frame, "已暂停", (center_x, 50), (255, 0, 0), 50)
+                    # === 修改结束 ===
                 
                 else:
                     # 暂停时显示最后一帧
@@ -655,7 +735,7 @@ class LicensePlateSystem:
                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
                 
                 # 显示图像
-                cv2.imshow('车牌识别 - 实时检测', display_frame)
+                cv2.imshow('LPR System - Realtime', display_frame)
                 
                 # 键盘控制
                 key = cv2.waitKey(1) & 0xFF
@@ -739,7 +819,7 @@ class LicensePlateSystem:
         return result
 
     def _annotate_camera_frame(self, frame: np.ndarray, result: Dict) -> np.ndarray:
-        """在摄像头帧上标注检测结果"""
+        """在摄像头帧上标注检测结果 (支持中文)"""
         if 'bbox' not in result:
             return frame
         
@@ -748,13 +828,16 @@ class LicensePlateSystem:
         # 根据OCR结果选择颜色
         if result.get('ocr_success', False):
             color = (0, 255, 0)  # 绿色
+            # PIL颜色格式是RGB，OpenCV是BGR，所以这里转换一下给文字用
+            text_color = (0, 255, 0) 
         else:
             color = (0, 0, 255)  # 红色
+            text_color = (255, 0, 0)
         
-        # 绘制边界框
+        # 绘制边界框 (矩形框还是用OpenCV画比较快)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         
-        # 添加文本
+        # 准备文本信息
         text_lines = []
         if 'plate_text' in result and result['plate_text'] != "未知":
             text_lines.append(f"车牌: {result['plate_text']}")
@@ -765,18 +848,16 @@ class LicensePlateSystem:
         
         text_lines.append(f"检测: {result['detection_confidence']:.2f}")
         
-        # 计算文本位置
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        thickness = 1
-        
-        # 计算总高度
-        total_height = len(text_lines) * 20 + 10
+        # 计算文本位置和背景
+        font_size = 20
+        line_height = font_size + 5
+        total_height = len(text_lines) * line_height + 10
+        max_width = 200 # 估算宽度
         
         # 文本背景位置
         bg_x1 = x1
         bg_y1 = max(0, y1 - total_height - 10)
-        bg_x2 = x1 + 200
+        bg_x2 = x1 + max_width
         bg_y2 = y1 - 5
         
         # 如果上方空间不足，放在下方
@@ -784,16 +865,22 @@ class LicensePlateSystem:
             bg_y1 = y2 + 5
             bg_y2 = bg_y1 + total_height + 10
         
-        # 绘制文本背景
-        cv2.rectangle(frame, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+        # 绘制半透明黑色背景
+        # 使用切片方式比cv2.rectangle绘制半透明更快
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+        alpha = 0.6
+        frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+        
+        # 绘制边框
         cv2.rectangle(frame, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 1)
         
-        # 绘制文本
-        y_offset = bg_y1 + 15
+        # 绘制中文文本
+        y_offset = bg_y1 + 5
         for line in text_lines:
-            cv2.putText(frame, line, (bg_x1 + 5, y_offset), 
-                       font, font_scale, (255, 255, 255), thickness)
-            y_offset += 20
+            # 文字颜色使用白色，看起来更清晰
+            frame = self.draw_chinese_text(frame, line, (bg_x1 + 5, y_offset), (255, 255, 255), font_size)
+            y_offset += line_height
         
         return frame
     
