@@ -1,0 +1,8 @@
+主程序可直接使用
+
+license_plate_preprocessor为预处理模块
+license_plate_detection为车牌定位
+license_plate_ocr_engine为文字检测和颜色检测
+camera_launcher为实时摄像头启动器
+carmera_realtime为实时摄像头
+video_processor为视频检测

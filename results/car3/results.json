@@ -1,0 +1,18 @@
+[
+  {
+    "plate_id": 1,
+    "plate_text": "京A026508",
+    "plate_type": "绿牌",
+    "detection_confidence": 0.8563213348388672,
+    "ocr_confidence": 0.951295018196106,
+    "bbox": [
+      739,
+      413,
+      1392,
+      615
+    ],
+    "detection_time": 0.11789345741271973,
+    "ocr_time": 0.41978979110717773,
+    "total_time": 0.5376832485198975
+  }
+]

@@ -1,0 +1,45 @@
+# ============================================
+# 车牌识别系统 - 依赖配置文件
+# 自动生成于: 2026-01-14 22:51:51
+# ============================================
+
+# 系统信息
+# python_version: 3.13.3 (tags/v3.13.3:6280bb5, Apr  8 2025, 14:47:33) [MSC v.1943 64 bit (AMD64)]
+# platform: Windows-11-10.0.26100-SP0
+# processor: Intel64 Family 6 Model 183 Stepping 1, GenuineIntel
+# time: 2026-01-14 22:51:51
+
+# 特殊包检测
+# cuda_available: True
+# cuda_info: Wed Jan 14 22:51:49 2026...
+# torch_installed: True
+# torch_version: 2.9.1+cpu
+# torch_cuda: False
+
+# 核心依赖 (必需)
+numpy==2.2.6
+opencv-python==4.12.0.88
+paddleocr==2.10.0
+paddlepaddle-gpu==3.4.0.dev20260113
+torch==2.9.1
+torch==2.9.1
+ultralytics==8.4.0
+
+# 需要安装的依赖
+argparse>=0.0.0  # 需要安装
+
+# ============================================
+# 安装建议
+# ============================================
+
+# 1. 安装所有依赖:
+# pip install -r requirements.txt
+
+# 2. 最小化安装 (仅核心依赖):
+# pip install opencv-python numpy ultralytics paddlepaddle paddleocr torch torchvision
+
+# 3. CUDA版本PyTorch (检测到GPU):
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# 4. 可选依赖:
+# pip install matplotlib pandas scikit-learn scikit-image scipy tqdm

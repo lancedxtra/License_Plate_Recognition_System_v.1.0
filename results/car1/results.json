@@ -1,0 +1,18 @@
+[
+  {
+    "plate_id": 1,
+    "plate_text": "京KR3763",
+    "plate_type": "蓝牌",
+    "detection_confidence": 0.8858986496925354,
+    "ocr_confidence": 0.9972144722938536,
+    "bbox": [
+      741,
+      535,
+      1178,
+      717
+    ],
+    "detection_time": 0.13364219665527344,
+    "ocr_time": 0.4830343723297119,
+    "total_time": 0.6166765689849854
+  }
+]

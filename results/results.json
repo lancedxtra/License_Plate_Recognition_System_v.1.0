@@ -1,0 +1,18 @@
+[
+  {
+    "plate_id": 1,
+    "plate_text": "未知",
+    "plate_type": "未知",
+    "detection_confidence": 0.8296454548835754,
+    "ocr_confidence": 0.0,
+    "bbox": [
+      124,
+      399,
+      651,
+      597
+    ],
+    "detection_time": 0.23853182792663574,
+    "ocr_time": 0.0028319358825683594,
+    "total_time": 0.2413637638092041
+  }
+]
