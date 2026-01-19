@@ -181,7 +181,7 @@ class LicensePlateDetector:
             return None, None
         
         # 执行推理
-        results = self.model.predict(source=img, conf=self.conf_threshold, save=False)
+        results = self.model.predict(source=img, conf=self.conf_threshold, save=False, verbose=False)
         
         # 查找最佳车牌
         best_plate = None
@@ -229,7 +229,7 @@ class LicensePlateDetector:
             return []
         
         # 执行推理
-        results = self.model.predict(source=img, conf=self.conf_threshold, save=False)
+        results = self.model.predict(source=img, conf=self.conf_threshold, save=False, verbose=False)
         
         plates_info = []
         
