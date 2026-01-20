@@ -41,99 +41,98 @@ CHINESE_PROVINCES = [
 # ==================== 优化车牌颜色识别 (HSV + 像素统计抗干扰版) ====================
 def get_plate_type_by_hsv(img_crop, text):
     """
-    车牌颜色识别 - 解决蓝牌/黄牌误判，抗反光干扰
+    车牌颜色识别 - 严格遵循位数逻辑
+    逻辑：字符长度为8 -> 绿牌；字符长度不为8 -> 强制排除绿牌
     """
     if img_crop is None or img_crop.size == 0: 
         return "未知"
     
-    text = str(text).upper()
+    # 清理文本，确保长度计算准确
+    text = str(text).upper().replace(" ", "").replace(".", "").strip()
+    text_len = len(text)
     
-    # --- 1. 优先规则判断 (特殊车牌) ---
+    # --- 1. 绝对规则判断 (优先级最高) ---
+    
+    # 【用户指定逻辑】如果字符长度为8，直接判定为绿牌
+    if text_len == 8:
+        return "绿牌"
+        
+    # 特殊车牌前缀判断 (针对7位及以下的情况)
     if "警" in text or "应急" in text: return "白牌 (警用)"
     if "使" in text or "领" in text: return "黑牌/白牌 (使领馆)"
     if "学" in text: return "黄牌 (教练)"
     if "港" in text or "澳" in text: return "黑牌 (港澳)"
-    if len(text) == 8: return "绿牌"  # 新能源绝对规则
 
-    # --- 2. 图像预处理 (核心优化) ---
+    # --- 2. 图像预处理 ---
     h, w = img_crop.shape[:2]
-    
-    # 【优化A】中心裁剪：去除车牌边框和背景干扰，只取中间 50% 区域
-    # 很多误判是因为读到了车牌边框的白线/黑线
+    # 中心裁剪：只取中间区域分析颜色，避开边框
     crop_h_start, crop_h_end = int(h * 0.25), int(h * 0.75)
     crop_w_start, crop_w_end = int(w * 0.1), int(w * 0.9)
     roi = img_crop[crop_h_start:crop_h_end, crop_w_start:crop_w_end]
+    
+    if roi.size == 0: return "未知"
     
     # 转 HSV
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     
     # --- 3. 定义精准颜色范围 ---
-    # 蓝牌 (Blue): 色调 100-124
+    # 蓝牌
     lower_blue = np.array([100, 43, 46])
     upper_blue = np.array([124, 255, 255])
-    
-    # 黄牌 (Yellow): 色调 11-34
+    # 黄牌
     lower_yellow = np.array([11, 43, 46])
     upper_yellow = np.array([34, 255, 255])
-    
-    # 绿牌 (Green): 色调 35-99
+    # 绿牌
     lower_green = np.array([35, 43, 46])
     upper_green = np.array([99, 255, 255])
     
-    # --- 4. 像素统计 (排除黑白像素) ---
-    # 我们只关心“有颜色”的像素，忽略白色(字)和黑色(字/边框)
-    
-    # 创建掩膜
+    # --- 4. 像素统计 ---
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
     mask_yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
     mask_green = cv2.inRange(hsv, lower_green, upper_green)
     
-    # 统计有效像素数量
     score_blue = cv2.countNonZero(mask_blue)
     score_yellow = cv2.countNonZero(mask_yellow)
     score_green = cv2.countNonZero(mask_green)
     
-    # 计算总有效像素（排除极黑极白）
-    # S > 40 且 V > 40 且 V < 220 认为是有效彩色背景
-    # 这一步是为了防止把“过曝的蓝色”误判为白色，或者“阴影里的黄色”误判为黑色
-    mask_color_area = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([180, 255, 230]))
-    total_valid_pixels = cv2.countNonZero(mask_color_area)
+    # 计算有效彩色区域总像素 (S>40, V>40, V<230 排除极黑极白)
+    mask_valid = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([180, 255, 230]))
+    total_valid = cv2.countNonZero(mask_valid)
+    if total_valid == 0: total_valid = 1
     
-    if total_valid_pixels == 0: total_valid_pixels = 1 # 防止除零
+    ratio_blue = score_blue / total_valid
+    ratio_yellow = score_yellow / total_valid
+    ratio_green = score_green / total_valid
     
-    # 计算占比
-    ratio_blue = score_blue / total_valid_pixels
-    ratio_yellow = score_yellow / total_valid_pixels
-    ratio_green = score_green / total_valid_pixels
-    
-    # --- 5. 颜色竞争判定 (Winner Takes All) ---
-    
-    # 打印调试信息（可选，如果想看为什么判错了可以取消注释）
-    # print(f"颜色得分 -> 蓝:{ratio_blue:.2f}, 黄:{ratio_yellow:.2f}, 绿:{ratio_green:.2f}")
-
-    # 这里的阈值 0.3 表示：只要该颜色占据了有效区域的 30% 以上，就认为是主色
-    # 为什么要比？防止那种既像蓝又像绿的情况
-    
+    # --- 5. 颜色竞争判定 ---
     max_score = max(ratio_blue, ratio_yellow, ratio_green)
     
+    # 如果颜色特征都不明显
     if max_score < 0.2:
-        # 如果所有彩色都很弱，可能是黑牌或白牌
-        # 重新分析亮度
+        # 分析亮度
         avg_v = np.mean(hsv[:,:,2])
         if avg_v < 50: return "黑牌"
-        if avg_v > 200: return "白牌" # 极亮且无色
-        # 默认兜底：如果是7位，通常是蓝牌（因为蓝牌最容易被误判为无色）
-        if len(text) == 7: return "蓝牌" 
-        return "未知"
-        
-    if ratio_blue == max_score:
+        if avg_v > 200: return "白牌"
+        # 默认兜底：7位通常是蓝牌
         return "蓝牌"
+        
+    # 颜色分支
+    if ratio_green == max_score:
+        # 【用户指定逻辑】HSV显示是绿色，但字符不是8位 -> 强制否定绿牌
+        # 因为前面 if text_len == 8 已返回，能走到这里说明 text_len != 8
+        # 回退逻辑：比较黄和蓝，谁大选谁，默认偏向蓝牌
+        if ratio_yellow > ratio_blue:
+            return "黄牌"
+        else:
+            return "蓝牌" # 蓝牌在某些光线下容易偏青，误判为绿
+            
     elif ratio_yellow == max_score:
         return "黄牌"
-    elif ratio_green == max_score:
-        return "绿牌"
         
-    return "蓝牌" # 默认兜底
+    elif ratio_blue == max_score:
+        return "蓝牌"
+        
+    return "蓝牌" # 最终兜底
 
 # ==================== 车牌格式验证函数 ====================
 def validate_license_plate_format(text):
