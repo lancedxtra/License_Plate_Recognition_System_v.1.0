@@ -336,7 +336,7 @@ def get_license_plate_info(img_path):
         # --- 4. 遍历并筛选 ---
         plate_candidates = []
         
-        print(f"📊 [DEBUG] 解析出 {len(ocr_candidates)} 个文本区域")
+        print(f"📊 解析出 {len(ocr_candidates)} 个文本区域")
 
         for item in ocr_candidates:
             # 统一获取属性
@@ -347,7 +347,7 @@ def get_license_plate_info(img_path):
             # 清理文本
             cleaned_text = text.replace(" ", "").replace("·", "").replace(".", "").replace("-", "").upper()
             
-            print(f"  📝 识别结果: '{text}' -> 清洗后: '{cleaned_text}'")
+            print(f"📝 识别结果: '{text}' -> 清洗后: '{cleaned_text}'")
 
             # 基础过滤
             if len(cleaned_text) < 5: continue

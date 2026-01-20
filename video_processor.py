@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 import traceback
+from PIL import Image, ImageDraw, ImageFont  # [修改] 引入PIL
 
 # 导入三个核心模块
 try:
@@ -31,18 +32,11 @@ class VideoLicensePlateProcessor:
                  use_preprocessing: bool = True):
         """
         初始化视频处理器
-        
-        Args:
-            detector_config: 检测器配置
-            preprocessor_config: 预处理器配置
-            conf_threshold: 检测置信度阈值
-            use_preprocessing: 是否使用预处理
         """
         print("初始化视频车牌处理器...")
         
         if not MODULES_AVAILABLE:
-            raise ImportError("必要的模块未找到，请确保 license_plate_detection.py, "
-                            "license_plate_preprocessor.py, license_plate_ocr_engine.py 存在")
+            raise ImportError("必要的模块未找到...")
         
         # 使用提供的配置或默认配置
         detector_config = detector_config or {}
@@ -71,20 +65,47 @@ class VideoLicensePlateProcessor:
         self.all_detections = []
         self.detection_history = {}  # 车牌追踪历史
         self.plate_counter = 0
+
+        # [修改] 初始化字体
+        self.font = None
+        self.font_path = None
+        self._init_font()
         
         print("✓ 视频处理器初始化完成")
+
+    # [新增] 初始化字体方法
+    def _init_font(self):
+        font_paths = [
+            "simhei.ttf", "msyh.ttf", "font.ttf",
+            "C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/msyh.ttf",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
+        ]
+        for path in font_paths:
+            if os.path.exists(path):
+                try:
+                    self.font_path = path
+                    self.font = ImageFont.truetype(path, 20, encoding="utf-8")
+                    return
+                except: continue
+        self.font = ImageFont.load_default()
+
+    # [新增] 绘制中文方法
+    def draw_chinese_text(self, img, text, position, text_color, text_size=20):
+        if (isinstance(img, np.ndarray)):
+            img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img_pil)
+            
+            font = self.font
+            if self.font_path and os.path.exists(self.font_path):
+                font = ImageFont.truetype(self.font_path, text_size, encoding="utf-8")
+                
+            draw.text(position, text, font=font, fill=text_color, stroke_width=0)
+            return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        return img
     
     @classmethod
     def from_system(cls, system):
-        """
-        从LicensePlateSystem创建视频处理器
-        
-        Args:
-            system: LicensePlateSystem实例
-            
-        Returns:
-            VideoLicensePlateProcessor实例
-        """
+        """从LicensePlateSystem创建视频处理器"""
         return cls(
             detector_config={'model_path': 'yolov8s.pt'},
             preprocessor_config={'target_size': (640, 480)},
@@ -105,67 +126,38 @@ class VideoLicensePlateProcessor:
                           output_fps: int = 0,
                           show_progress: bool = True,
                           max_frames: int = 0) -> Dict:
-        """
-        处理视频文件
-        
-        Args:
-            video_path: 视频文件路径
-            output_dir: 输出目录
-            detection_interval: 检测间隔帧数
-            save_results: 是否保存结果
-            save_frames: 是否保存中间帧
-            save_json: 是否保存JSON结果
-            display: 是否显示处理过程
-            start_time: 开始时间（秒）
-            duration: 处理时长（秒，0表示全部）
-            output_fps: 输出视频帧率（0表示保持原样）
-            show_progress: 是否显示进度
-            max_frames: 最大处理帧数（0表示无限制）
-            
-        Returns:
-            处理结果字典
-        """
+        """处理视频文件 (优化：视觉暂留 + 统计合并)"""
         print(f"开始处理视频: {video_path}")
         print("-" * 60)
         
-        # 打开视频文件
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"错误：无法打开视频文件 {video_path}")
             return {"error": f"无法打开视频文件 {video_path}", "success": False}
         
-        # 获取视频信息
         self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         fps = original_fps if original_fps > 0 else 30
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        # 计算开始帧和结束帧
         start_frame = int(start_time * fps)
         if duration > 0:
             end_frame = min(self.total_frames, start_frame + int(duration * fps))
         else:
             end_frame = self.total_frames
         
-        # 应用最大帧数限制
         if max_frames > 0:
             end_frame = min(end_frame, start_frame + max_frames)
         
-        print(f"视频信息:")
-        print(f"  分辨率: {width}x{height}")
-        print(f"  帧率: {fps:.1f}fps")
-        print(f"  总帧数: {self.total_frames}")
-        print(f"  处理范围: 第{start_frame}帧到第{end_frame}帧 (共{end_frame-start_frame}帧)")
-        print(f"  检测间隔: 每{detection_interval}帧检测一次")
+        print(f"视频信息: {width}x{height} @ {fps:.1f}fps, 总帧数: {self.total_frames}")
         
-        # 创建输出目录
+        # 初始化输出目录
         if save_results:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             video_name = Path(video_path).stem
             self.output_dir = Path(output_dir) / "video" / f"{video_name}_{timestamp}"
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            
             self.frames_dir = self.output_dir / "frames"
             self.plates_dir = self.output_dir / "plates"
             self.frames_dir.mkdir(exist_ok=True)
@@ -173,7 +165,6 @@ class VideoLicensePlateProcessor:
         else:
             self.output_dir = None
         
-        # 创建视频写入器（用于保存处理后的视频）
         out = None
         if save_results:
             output_video_path = self.output_dir / "output_video.mp4"
@@ -181,560 +172,334 @@ class VideoLicensePlateProcessor:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(str(output_video_path), fourcc, output_fps_val, (width, height))
         
-        # 跳转到开始帧
         if start_frame > 0:
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
-        # 处理每一帧
         start_process_time = time.time()
         frame_index = start_frame
+        
+        # === 核心修改：用于视觉暂留的列表 ===
+        # 存储格式: [{'plate_info': ..., 'plate_result': ..., 'plate_id': ...}, ...]
+        current_draw_list = [] 
+        # 记录上次检测到车牌的帧，用于超时清除
+        last_detection_frame = -1
         
         try:
             while frame_index < end_frame:
                 ret, frame = cap.read()
-                if not ret:
-                    break
+                if not ret: break
                 
-                # 处理当前帧
-                processed_frame, frame_detections = self._process_frame(
+                # 1. 执行处理（检测）
+                # 注意：这里不再返回处理后的帧，而是返回检测数据
+                detections_data, frame_detections = self._process_frame_data(
                     frame, frame_index, fps, detection_interval
                 )
                 
-                # 保存处理后的帧
+                # 2. 更新绘图列表 (视觉暂留逻辑)
+                if frame_index % detection_interval == 0:
+                    # 如果是检测帧
+                    if detections_data:
+                        # 如果检测到了车牌，更新绘图列表
+                        current_draw_list = detections_data
+                        last_detection_frame = frame_index
+                    else:
+                        # 如果没检测到，不要立刻清空，给一点“宽限期” (比如10帧)
+                        # 如果超过宽限期还没检测到，才清空，防止框子一直卡在屏幕上
+                        if frame_index - last_detection_frame > 10: 
+                            current_draw_list = []
+                
+                # 3. 统一绘图 (每一帧都画)
+                processed_frame = frame.copy()
+                for item in current_draw_list:
+                    processed_frame = self._annotate_video_frame(
+                        processed_frame, 
+                        item['plate_info'], 
+                        item['plate_result'], 
+                        item['plate_id']
+                    )
+                
+                # 4. 保存与显示
                 if save_results and out is not None:
                     out.write(processed_frame)
-                    
-                    # 保存关键帧
                     if save_frames and frame_detections:
-                        frame_filename = self.frames_dir / f"frame_{frame_index:06d}.jpg"
-                        cv2.imwrite(str(frame_filename), processed_frame)
+                        cv2.imwrite(str(self.frames_dir / f"frame_{frame_index:06d}.jpg"), processed_frame)
                 
-                # 显示处理过程
                 if display:
-                    # 显示进度条
                     if show_progress:
-                        progress_text = f"帧: {frame_index}/{end_frame}"
-                        cv2.putText(processed_frame, progress_text, (10, 30),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        progress_text = f"进度: {frame_index}/{end_frame}"
+                        processed_frame = self.draw_chinese_text(processed_frame, progress_text, (10, 30), (0, 255, 255), 20)
                     
-                    cv2.imshow('视频处理 - 车牌识别', processed_frame)
+                    cv2.imshow('Video Processing', processed_frame)
                     
-                    # 控制播放速度
                     delay = max(1, int(1000 / fps) - 10)
                     key = cv2.waitKey(delay) & 0xFF
-                    
-                    if key == ord('q'):  # 退出
-                        print("用户中断")
-                        break
-                    elif key == ord('p'):  # 暂停
-                        print("暂停播放，按任意键继续...")
-                        cv2.waitKey(0)
-                    elif key == ord('s'):  # 单步
-                        print("单步模式，按任意键继续下一帧...")
-                        cv2.waitKey(0)
-                    elif key == ord('f'):  # 快进10帧
-                        for _ in range(10):
-                            ret, _ = cap.read()
-                            frame_index += 1
-                            if not ret:
-                                break
+                    if key == ord('q'): break
+                    elif key == ord('p'): cv2.waitKey(0)
                 
-                # 显示进度
                 if show_progress and frame_index % 100 == 0:
                     elapsed = time.time() - start_process_time
                     progress = (frame_index - start_frame) / (end_frame - start_frame) * 100
-                    estimated_total = elapsed / progress * 100 if progress > 0 else 0
-                    remaining = estimated_total - elapsed if estimated_total > elapsed else 0
-                    
-                    print(f"进度: {frame_index}/{end_frame} ({progress:.1f}%) | "
-                          f"已处理: {elapsed:.1f}s | 剩余: {remaining:.1f}s | "
-                          f"检测到: {len(self.all_detections)}个车牌")
+                    print(f"进度: {progress:.1f}% | 耗时: {elapsed:.1f}s")
                 
                 frame_index += 1
         
-        except KeyboardInterrupt:
-            print("\n用户中断")
+        except KeyboardInterrupt: print("\n用户中断")
         except Exception as e:
             print(f"处理视频时出错: {e}")
             traceback.print_exc()
         finally:
             cap.release()
-            if out is not None:
-                out.release()
-            if display:
-                cv2.destroyAllWindows()
+            if out is not None: out.release()
+            if display: cv2.destroyAllWindows()
             
-            # 保存统计信息和结果
             if save_results and self.output_dir:
                 elapsed_time = time.time() - start_process_time
                 self._save_statistics(video_path, elapsed_time, fps, width, height, start_frame, end_frame)
-                if save_json:
-                    self._save_detections_json()
+                if save_json: self._save_detections_json()
             
-            # 打印汇总
             self._print_summary(video_path, start_process_time)
         
-        # 返回结果
-        result = {
+        return {
             "success": True,
-            "video_path": video_path,
             "total_frames": self.total_frames,
             "processed_frames": self.processed_frames,
             "detection_count": len(self.all_detections),
             "unique_plates": len(self.detection_history),
             "output_dir": str(self.output_dir) if self.output_dir else None,
-            "detections": self.all_detections[:100] if len(self.all_detections) > 100 else self.all_detections,  # 限制返回数量
-            "frame_rate": fps,
-            "resolution": f"{width}x{height}"
+            "detections": self.all_detections[:100] if len(self.all_detections) > 100 else self.all_detections
         }
-        
-        return result
     
-    def _process_frame(self, frame: np.ndarray, frame_index: int, fps: float, 
-                      detection_interval: int) -> Tuple[np.ndarray, List[Dict]]:
+    def _process_frame_data(self, frame: np.ndarray, frame_index: int, fps: float, 
+                      detection_interval: int) -> Tuple[List[Dict], List[Dict]]:
         """
-        处理单帧
-        
-        Returns:
-            processed_frame: 处理后的帧
-            detections: 当前帧的检测结果
+        处理单帧数据 (不进行绘图，只返回数据)
+        返回: (visual_data_list, log_detections_list)
         """
-        processed_frame = frame.copy()
-        detections = []
+        visual_data = [] # 用于绘图的数据
+        detections = []  # 用于日志记录的数据
         
-        # 每隔一定帧数进行检测（减少计算量）
         if frame_index % detection_interval == 0:
             self.processed_frames += 1
-            
             try:
-                # 保存临时文件用于检测
                 temp_path = f"temp_frame_{frame_index}_{int(time.time())}.jpg"
                 cv2.imwrite(temp_path, frame)
-                
-                # 检测车牌
                 plates_info = self.detector.detect_all_and_rectify(temp_path)
                 
                 for i, plate_info in enumerate(plates_info):
-                    # 过滤低置信度检测
-                    if plate_info['confidence'] < self.conf_threshold:
-                        continue
+                    if plate_info['confidence'] < self.conf_threshold: continue
                     
-                    # 识别车牌文字
                     plate_result = self._recognize_plate(plate_info, frame_index, i)
-                    
-                    # 添加到检测历史（用于追踪）
                     plate_id = self._track_plate(plate_result, frame_index)
                     
-                    # 记录检测结果
+                    # 1. 准备日志数据
                     detection_record = {
                         'frame_index': frame_index,
                         'timestamp': frame_index / fps,
                         'plate_id': plate_id,
                         **plate_result
                     }
-                    
                     detections.append(detection_record)
                     self.all_detections.append(detection_record)
                     
-                    # 在帧上标注
-                    processed_frame = self._annotate_video_frame(
-                        processed_frame, plate_info, plate_result, plate_id
-                    )
+                    # 2. 准备绘图数据 (包含坐标、文字、ID)
+                    visual_data.append({
+                        'plate_info': plate_info,
+                        'plate_result': plate_result,
+                        'plate_id': plate_id
+                    })
                     
-                    # 保存车牌图像
+                    # 保存车牌截图
                     if self.output_dir and plate_result.get('ocr_success', False):
                         plate_text = plate_result.get('plate_text', 'unknown').replace('/', '_')
-                        plate_filename = self.plates_dir / f"frame_{frame_index:06d}_plate_{i}_{plate_text}.jpg"
-                        cv2.imwrite(str(plate_filename), plate_info['rectified'])
+                        cv2.imwrite(str(self.plates_dir / f"frame_{frame_index:06d}_plate_{i}_{plate_text}.jpg"), plate_info['rectified'])
                 
-                # 清理临时文件
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-                    
-            except Exception as e:
-                print(f"帧 {frame_index} 检测出错: {e}")
+                try: os.remove(temp_path)
+                except: pass
+            except Exception as e: print(f"帧 {frame_index} 检测出错: {e}")
         
-        return processed_frame, detections
+        return visual_data, detections
+    
+
     
     def _recognize_plate(self, plate_info: Dict, frame_index: int, plate_index: int) -> Dict:
-        """识别车牌文字"""
-        result = {
-            'frame_index': frame_index,
-            'plate_index': plate_index,
-            'detection_confidence': plate_info['confidence'],
-            'bbox': plate_info['bbox'],
-            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
-            'ocr_success': False
-        }
+        result = {'frame_index': frame_index, 'plate_index': plate_index,
+                 'detection_confidence': plate_info['confidence'], 'bbox': plate_info['bbox'],
+                 'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"), 'ocr_success': False}
         
-        # 获取矫正后的车牌图像
         rectified_image = plate_info['rectified']
-        if rectified_image is None or rectified_image.size == 0:
-            return result
+        if rectified_image is None or rectified_image.size == 0: return result
         
         try:
-            # 预处理
             preprocessed_image = rectified_image
             if self.use_preprocessing:
                 preprocessed_image, _ = self.preprocessor.preprocess_with_color_recovery(
-                    rectified_image,
-                    detect_plate_region=True
-                )
+                    rectified_image, detect_plate_region=True)
             
-            # 保存临时文件用于OCR
             temp_path = f"temp_plate_{frame_index}_{plate_index}_{int(time.time())}.jpg"
             cv2.imwrite(temp_path, preprocessed_image)
-            
-            # OCR识别
             ocr_result = get_license_plate_info(temp_path)
             
             if ocr_result:
                 plate_text, ocr_confidence, plate_type = ocr_result
-                result.update({
-                    'plate_text': plate_text,
-                    'ocr_confidence': ocr_confidence,
-                    'plate_type': plate_type,
-                    'ocr_success': True
-                })
-            
-            # 清理临时文件
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-                
-        except Exception as e:
-            print(f"车牌识别出错: {e}")
-            result['error'] = str(e)
-        
+                result.update({'plate_text': plate_text, 'ocr_confidence': ocr_confidence,
+                             'plate_type': plate_type, 'ocr_success': True})
+            try: os.remove(temp_path)
+            except: pass
+        except Exception as e: result['error'] = str(e)
         return result
     
     def _track_plate(self, plate_result: Dict, frame_index: int) -> str:
-        """简单车牌追踪（基于位置和文字）"""
-        if not plate_result.get('ocr_success', False):
-            return f"unknown_{frame_index}"
-        
+        """简单车牌追踪"""
+        if not plate_result.get('ocr_success', False): return f"unknown_{frame_index}"
         plate_text = plate_result['plate_text']
-        if plate_text == "未知":
-            return f"unknown_{frame_index}"
+        if plate_text == "未知": return f"unknown_{frame_index}"
         
         bbox = plate_result['bbox']
+        center_x = (bbox[0] + bbox[2]) / 2
+        center_y = (bbox[1] + bbox[3]) / 2
         
-        # 计算车牌中心点
-        x1, y1, x2, y2 = bbox
-        center_x = (x1 + x2) / 2
-        center_y = (y1 + y2) / 2
-        
-        # 查找最近的历史检测
         closest_plate_id = None
         min_distance = float('inf')
         
         for plate_id, history in self.detection_history.items():
-            last_detection = history['last_detection']
-            last_bbox = last_detection['bbox']
+            last_bbox = history['last_detection']['bbox']
             last_x = (last_bbox[0] + last_bbox[2]) / 2
             last_y = (last_bbox[1] + last_bbox[3]) / 2
-            
-            # 计算欧氏距离
             distance = np.sqrt((center_x - last_x)**2 + (center_y - last_y)**2)
             
-            # 如果距离较小且文字相同，可能是同一个车牌
-            if distance < 100 and last_detection.get('plate_text') == plate_text:
+            if distance < 100 and history['last_detection'].get('plate_text') == plate_text:
                 if distance < min_distance:
                     min_distance = distance
                     closest_plate_id = plate_id
         
-        # 如果是新车牌
         if closest_plate_id is None:
             self.plate_counter += 1
             plate_id = f"plate_{self.plate_counter:03d}"
             self.detection_history[plate_id] = {
-                'first_frame': frame_index,
-                'last_frame': frame_index,
-                'detection_count': 1,
-                'last_detection': plate_result,
-                'all_texts': [plate_text] if plate_text != "未知" else []
+                'first_frame': frame_index, 'last_frame': frame_index, 'detection_count': 1,
+                'last_detection': plate_result, 'all_texts': [plate_text]
             }
         else:
-            # 更新现有车牌
             plate_id = closest_plate_id
             history = self.detection_history[plate_id]
             history['last_frame'] = frame_index
             history['detection_count'] += 1
             history['last_detection'] = plate_result
-            
-            if plate_text not in history['all_texts']:
-                history['all_texts'].append(plate_text)
+            if plate_text not in history['all_texts']: history['all_texts'].append(plate_text)
         
         return plate_id
     
     def _annotate_video_frame(self, frame: np.ndarray, plate_info: Dict, 
                              plate_result: Dict, plate_id: str) -> np.ndarray:
-        """在视频帧上标注检测结果"""
+        """[修改] 在视频帧上标注检测结果 (支持中文)"""
+        if not plate_info or 'bbox' not in plate_info: return frame
         x1, y1, x2, y2 = plate_info['bbox']
         
-        # 根据识别结果选择颜色
+        text_lines = []
         if plate_result.get('ocr_success', False):
-            # 根据车牌类型选择颜色
             plate_type = plate_result.get('plate_type', '')
-            color_map = {
-                '蓝牌': (255, 0, 0),      # 蓝色
-                '黄牌': (0, 255, 255),    # 黄色
-                '新能源绿牌': (0, 255, 0), # 绿色
-                '绿牌': (0, 255, 0),      # 绿色
-                '白牌': (255, 255, 255),  # 白色
-                '黑牌': (0, 0, 0),        # 黑色
-                '白牌 (警用)': (255, 255, 255),  # 白色
-            }
-            color = color_map.get(plate_type, (0, 255, 0))
-            text = f"{plate_id}: {plate_result.get('plate_text', '')} ({plate_type})"
+            color_map = {'蓝牌': (255,0,0), '黄牌': (0,255,255), '新能源绿牌': (0,255,0)}
+            color = color_map.get(plate_type, (0,255,0))
+            text_lines.append(f"{plate_id}: {plate_result.get('plate_text', '')}")
+            text_lines.append(f"类型: {plate_type}")
+            text_lines.append(f"置信度: {plate_result.get('ocr_confidence', 0):.2f}")
         else:
-            color = (0, 0, 255)  # 红色 - 仅检测到
-            text = f"{plate_id}: 检测"
+            color = (0, 0, 255)
+            text_lines.append(f"{plate_id}: 检测中...")
         
-        # 绘制边界框
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         
-        # 绘制车牌ID和文本
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        thickness = 2
+        line_height = 25
+        bg_height = len(text_lines) * line_height + 10
+        bg_y1 = max(0, y1 - bg_height)
+        if bg_y1 == 0: bg_y1 = y2 # 下方显示
         
-        # 文本背景
-        text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-        bg_x2 = x1 + text_size[0] + 10
-        bg_y1 = max(0, y1 - text_size[1] - 10)
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1, bg_y1), (x1 + 220, bg_y1 + bg_height), (0,0,0), -1)
+        frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
         
-        cv2.rectangle(frame, (x1, bg_y1), (bg_x2, y1), color, -1)
-        
-        # 文本颜色（确保在深色背景上可见）
-        if plate_type in ['白牌', '白牌 (警用)']:
-            text_color = (0, 0, 0)  # 白牌用黑色文字
-        else:
-            text_color = (255, 255, 255)  # 其他用白色文字
-            
-        cv2.putText(frame, text, (x1 + 5, y1 - 5), 
-                   font, font_scale, text_color, thickness)
-        
-        # 添加置信度（如果可用）
-        if plate_result.get('ocr_confidence'):
-            conf_text = f"置信度: {plate_result['ocr_confidence']:.2f}"
-            conf_size = cv2.getTextSize(conf_text, font, 0.5, 1)[0]
-            cv2.putText(frame, conf_text, (x1, y2 + conf_size[1] + 5), 
-                       font, 0.5, color, 1)
-        
-        # 添加检测置信度
-        det_conf_text = f"检测: {plate_result.get('detection_confidence', 0):.2f}"
-        cv2.putText(frame, det_conf_text, (x1, y2 + conf_size[1] * 2 + 10), 
-                   font, 0.5, color, 1)
+        y_offset = bg_y1 + 5
+        for line in text_lines:
+            frame = self.draw_chinese_text(frame, line, (x1 + 5, y_offset), (255, 255, 255), 20)
+            y_offset += line_height
         
         return frame
     
-    def _save_statistics(self, video_path: str, elapsed_time: float, fps: float, 
-                        width: int, height: int, start_frame: int, end_frame: int):
-        """保存统计信息"""
+    def _save_statistics(self, video_path, elapsed_time, fps, width, height, start_frame, end_frame):
+        """保存统计信息 (优化：按车牌号去重合并)"""
         stats_file = self.output_dir / "statistics.txt"
         
-        with open(stats_file, 'w', encoding='utf-8') as f:
-            f.write("=" * 60 + "\n")
-            f.write("视频车牌识别统计\n")
-            f.write("=" * 60 + "\n\n")
-            
-            f.write(f"视频文件: {video_path}\n")
-            f.write(f"处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"视频信息: {width}x{height} @ {fps:.1f}fps\n")
-            f.write(f"总帧数: {self.total_frames}\n")
-            f.write(f"处理范围: 第{start_frame}帧到第{end_frame}帧\n")
-            f.write(f"处理帧数: {self.processed_frames}\n")
-            f.write(f"检测间隔: 每10帧检测一次\n")
-            f.write(f"检测到车牌总数: {len(self.all_detections)}\n")
-            f.write(f"唯一车牌数: {len(self.detection_history)}\n")
-            f.write(f"处理耗时: {elapsed_time:.2f}秒\n")
-            if elapsed_time > 0:
-                f.write(f"处理速度: {self.processed_frames/elapsed_time:.1f} fps\n")
-            
-            # 车牌统计
-            if self.detection_history:
-                f.write("\n车牌追踪统计:\n")
-                f.write("-" * 40 + "\n")
-                
-                for plate_id, history in self.detection_history.items():
-                    first_frame = history['first_frame']
-                    last_frame = history['last_frame']
-                    frame_duration = last_frame - first_frame
-                    time_duration = frame_duration / fps
-                    
-                    f.write(f"\n车牌 {plate_id}:\n")
-                    f.write(f"  首次出现: 第{first_frame}帧 ({first_frame/fps:.1f}秒)\n")
-                    f.write(f"  最后出现: 第{last_frame}帧 ({last_frame/fps:.1f}秒)\n")
-                    f.write(f"  持续时间: {time_duration:.1f}秒\n")
-                    f.write(f"  检测次数: {history['detection_count']}\n")
-                    
-                    if history['all_texts']:
-                        texts = ", ".join(set(history['all_texts']))
-                        f.write(f"  识别文本: {texts}\n")
-            
-            # 检测结果汇总
-            f.write("\n\n检测结果汇总:\n")
-            f.write("=" * 60 + "\n")
-            
-            success_count = sum(1 for d in self.all_detections if d.get('ocr_success', False))
-            f.write(f"成功识别次数: {success_count}/{len(self.all_detections)}\n")
-            
-            # 车牌类型分布
-            type_distribution = {}
-            for detection in self.all_detections:
-                plate_type = detection.get('plate_type', '未知')
-                type_distribution[plate_type] = type_distribution.get(plate_type, 0) + 1
-            
-            f.write("\n车牌类型分布:\n")
-            for plate_type, count in type_distribution.items():
-                percentage = count / len(self.all_detections) * 100 if len(self.all_detections) > 0 else 0
-                f.write(f"  {plate_type}: {count}次 ({percentage:.1f}%)\n")
+        # === 1. 数据聚合逻辑 ===
+        merged_plates = {} # Key: 车牌号, Value: 统计对象
         
-        print(f"统计信息已保存: {stats_file}")
+        for plate_id, history in self.detection_history.items():
+            # 获取该ID最可信的车牌号 (取历史中出现过的)
+            texts = history.get('all_texts', [])
+            if not texts: continue
+            
+            # 简单策略：取最后一个识别到的号码，或者取众数
+            # 这里我们取列表里的第一个有效值作为代表
+            plate_text = texts[0] 
+            
+            if plate_text not in merged_plates:
+                merged_plates[plate_text] = {
+                    'count': 0,
+                    'first_frame': float('inf'),
+                    'last_frame': float('-inf'),
+                    'ids': []
+                }
+            
+            # 合并数据
+            data = merged_plates[plate_text]
+            data['count'] += history['detection_count']
+            data['first_frame'] = min(data['first_frame'], history['first_frame'])
+            data['last_frame'] = max(data['last_frame'], history['last_frame'])
+            data['ids'].append(plate_id)
+        
+        # === 2. 写入文件 ===
+        with open(stats_file, 'w', encoding='utf-8') as f:
+            f.write(f"视频: {video_path}\n处理时间: {datetime.now()}\n")
+            f.write(f"总帧数: {self.total_frames} | 处理: {self.processed_frames} | 耗时: {elapsed_time:.2f}s\n")
+            f.write(f"检测到车牌(不去重): {len(self.all_detections)}\n")
+            f.write(f"独立车牌数(去重后): {len(merged_plates)}\n")
+            
+            f.write("\n追踪详情 (按车牌号合并):\n")
+            f.write("-" * 50 + "\n")
+            
+            # 按出现时间排序
+            sorted_plates = sorted(merged_plates.items(), key=lambda x: x[1]['first_frame'])
+            
+            for text, data in sorted_plates:
+                start_sec = data['first_frame'] / fps
+                end_sec = data['last_frame'] / fps
+                duration = end_sec - start_sec
+                
+                f.write(f"车牌: {text}\n")
+                f.write(f"  出现时间: {start_sec:.1f}s - {end_sec:.1f}s (持续 {duration:.1f}s)\n")
+                f.write(f"  检测次数: {data['count']}\n")
+                # 如果你想看它关联了哪些原始ID，可以取消下面这行的注释
+                # f.write(f"  关联追踪ID: {', '.join(data['ids'])}\n") 
+                f.write("\n")
+                
+
     
     def _save_detections_json(self):
-        """保存检测结果到JSON文件"""
-        # 转换为可序列化的格式
-        serializable_detections = []
-        
-        for detection in self.all_detections:
-            serializable = {
-                'frame_index': detection['frame_index'],
-                'timestamp_seconds': detection['timestamp'],
-                'plate_id': detection['plate_id'],
-                'detection_confidence': detection['detection_confidence'],
-                'bbox': detection['bbox']
-            }
-            
-            if detection.get('ocr_success', False):
-                serializable.update({
-                    'plate_text': detection.get('plate_text', ''),
-                    'plate_type': detection.get('plate_type', '未知'),
-                    'ocr_confidence': detection.get('ocr_confidence', 0),
-                    'ocr_success': True
-                })
-            
-            serializable_detections.append(serializable)
-        
-        # 保存到文件
-        json_file = self.output_dir / "detections.json"
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(serializable_detections, f, ensure_ascii=False, indent=2)
-        
-        print(f"检测结果JSON已保存: {json_file}")
+        """保存JSON"""
+        serializable = []
+        for d in self.all_detections:
+            item = {k: v for k, v in d.items() if isinstance(v, (int, float, str, list, tuple))}
+            serializable.append(item)
+        with open(self.output_dir / "detections.json", 'w', encoding='utf-8') as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
     
-    def _print_summary(self, video_path: str, start_time: float):
-        """打印处理摘要"""
-        elapsed_time = time.time() - start_time
-        
-        print("\n" + "=" * 60)
-        print("视频处理完成摘要")
-        print("=" * 60)
-        print(f"视频文件: {Path(video_path).name}")
-        print(f"总处理时间: {elapsed_time:.2f}秒")
-        print(f"总帧数: {self.total_frames}")
-        print(f"处理帧数: {self.processed_frames}")
-        print(f"检测到车牌总数: {len(self.all_detections)}")
-        print(f"唯一车牌数: {len(self.detection_history)}")
-        if elapsed_time > 0:
-            print(f"处理速度: {self.processed_frames/elapsed_time:.1f} fps")
-        
-        if self.detection_history:
-            print(f"\n追踪到 {len(self.detection_history)} 个不同车牌:")
-            for plate_id, history in self.detection_history.items():
-                texts = set(history['all_texts'])
-                text_str = ", ".join(texts) if texts else "未识别"
-                print(f"  {plate_id}: 出现{history['detection_count']}次, "
-                      f"识别结果: {text_str}")
-        
-        if self.output_dir:
-            print(f"\n输出目录: {self.output_dir}")
-        print("=" * 60)
+    def _print_summary(self, video_path, start_time):
+        elapsed = time.time() - start_time
+        print(f"\n视频处理完成: {Path(video_path).name} | 耗时: {elapsed:.2f}s")
+        print(f"检测到 {len(self.detection_history)} 个唯一车牌")
 
 
 def create_video_processor_from_system(system):
-    """
-    从LicensePlateSystem创建视频处理器
-    
-    Args:
-        system: LicensePlateSystem实例
-        
-    Returns:
-        VideoLicensePlateProcessor实例
-    """
     return VideoLicensePlateProcessor.from_system(system)
 
-
-def test_video_processor():
-    """测试视频处理器"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="测试视频处理器")
-    parser.add_argument("--video", type=str, required=True, help="视频文件路径")
-    parser.add_argument("--model", type=str, default="yolov8s.pt", help="模型路径")
-    parser.add_argument("--output-dir", type=str, default="test_results", help="输出目录")
-    parser.add_argument("--interval", type=int, default=10, help="检测间隔")
-    parser.add_argument("--conf", type=float, default=0.5, help="置信度阈值")
-    
-    args = parser.parse_args()
-    
-    print("=" * 60)
-    print("测试视频处理器")
-    print("=" * 60)
-    
-    try:
-        # 创建视频处理器
-        processor = VideoLicensePlateProcessor(
-            detector_config={'model_path': args.model},
-            preprocessor_config={'target_size': (640, 480)},
-            conf_threshold=args.conf,
-            use_preprocessing=True
-        )
-        
-        # 处理视频
-        result = processor.process_video_file(
-            video_path=args.video,
-            output_dir=args.output_dir,
-            detection_interval=args.interval,
-            save_results=True,
-            save_frames=False,
-            save_json=True,
-            display=True,
-            show_progress=True
-        )
-        
-        print("\n" + "=" * 60)
-        print("测试完成！")
-        print("=" * 60)
-        
-        if result.get('success', False):
-            print(f"视频文件: {args.video}")
-            print(f"总帧数: {result['total_frames']}")
-            print(f"处理帧数: {result['processed_frames']}")
-            print(f"检测到车牌数: {result['detection_count']}")
-            print(f"唯一车牌数: {result['unique_plates']}")
-            print(f"输出目录: {result['output_dir']}")
-            
-            # 显示检测到的车牌
-            if result['detections']:
-                print(f"\n检测到的车牌 (前10个):")
-                for detection in result['detections'][:10]:
-                    plate_text = detection.get('plate_text', '未知')
-                    plate_type = detection.get('plate_type', '未知')
-                    frame_idx = detection.get('frame_index', 0)
-                    conf = detection.get('ocr_confidence', 0)
-                    print(f"  第{frame_idx}帧: {plate_text} ({plate_type}) 置信度: {conf:.2f}")
-        else:
-            print(f"处理失败: {result.get('error', '未知错误')}")
-            
-    except Exception as e:
-        print(f"测试过程中出错: {e}")
-        traceback.print_exc()
-
-
 if __name__ == "__main__":
-    test_video_processor()
+    print("请使用 main.py --video [路径] 运行")

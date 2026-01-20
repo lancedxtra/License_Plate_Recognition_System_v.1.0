@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
+
 # 导入三个模块
 from license_plate_detection import LicensePlateDetector
 from license_plate_preprocessor import LicensePlatePreprocessor
 from license_plate_ocr_engine import get_license_plate_info
+from camera_realtime import RealTimeLicensePlateDetector
 try:
     from video_processor import VideoLicensePlateProcessor, create_video_processor_from_system
     VIDEO_PROCESSOR_AVAILABLE = True
@@ -127,128 +129,74 @@ class LicensePlateSystem:
             return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
         return img
 
-    def process_single_plate(self, original_image: np.ndarray, 
-                            plate_info: Dict, 
-                            output_dir: str,
-                            plate_index: int,
-                            save_results: bool = True) -> Dict:
-        """
-        处理单个车牌
-        
-        Args:
-            original_image: 原始图像
-            plate_info: 车牌信息
-            output_dir: 输出目录
-            plate_index: 车牌索引
-            save_results: 是否保存结果
-            
-        Returns:
-            处理结果字典
-        """
-        print(f"\n处理车牌 {plate_index}:")
-        print(f"  检测置信度: {plate_info['confidence']:.3f}")
-        print(f"  位置: {plate_info['bbox']}")
-        
+    def process_single_plate(self, original_image: np.ndarray, plate_info: Dict, output_dir: str, plate_index: int, save_results: bool = True) -> Dict:
+        """处理单个车牌 (已修复 ocr_time 报错)"""
+        import time # 确保导入time库
+
         # 获取矫正后的车牌图像
         rectified_image = plate_info['rectified']
+        if rectified_image is None or rectified_image.size == 0: return None
         
-        if rectified_image is None or rectified_image.size == 0:
-            print(f"  警告: 车牌 {plate_index} 图像为空，跳过")
-            return None
+        # 直接使用矫正后的图像
+        final_plate_image = rectified_image 
         
-        # 1. 预处理（增强图像质量）
-        preprocessed_image = rectified_image
-        if self.use_preprocessing:
-            print("  步骤1: 预处理图像...")
-            try:
-                # 使用预处理器处理图像
-                preprocessed_image, preprocess_info = self.preprocessor.preprocess_with_color_recovery(
-                    rectified_image,
-                    detect_plate_region=True
-                )
-                
-                # 保存预处理前后的对比
-                if save_results:
-                    self._save_comparison(
-                        rectified_image, 
-                        preprocessed_image, 
-                        output_dir, 
-                        f"plate_{plate_index}_preprocess"
-                    )
-                
-            except Exception as e:
-                print(f"    预处理失败: {e}")
-                import traceback
-                traceback.print_exc()
-                preprocessed_image = rectified_image
-        
-        # 2. 保存预处理后的图像用于OCR
+        # 保存用于OCR的临时图片
         temp_plate_path = None
         if save_results:
             temp_plate_path = f"{output_dir}/plate_{plate_index}_for_ocr.jpg"
-            cv2.imwrite(temp_plate_path, preprocessed_image)
+            cv2.imwrite(temp_plate_path, final_plate_image)
         
-        # 3. OCR识别车牌信息（包含颜色检测）
-        print("  步骤2: OCR识别车牌（含颜色检测）...")
-        ocr_start = time.time()
+        ocr_input_path = temp_plate_path if temp_plate_path else f"temp_plate_{plate_index}.jpg"
+        if not temp_plate_path: 
+            cv2.imwrite(ocr_input_path, final_plate_image)
         
-        # 使用预处理后的图像进行识别
-        if temp_plate_path:
-            ocr_input_path = temp_plate_path
-        else:
-            # 临时保存图像用于OCR
-            temp_path = f"temp_plate_{plate_index}.jpg"
-            cv2.imwrite(temp_path, preprocessed_image)
-            ocr_input_path = temp_path
+        # === 修复点：添加计时逻辑 ===
+        ocr_start_time = time.time()
         
-        # 调用OCR引擎（包含颜色检测）
+        # 调用OCR引擎
         ocr_result = get_license_plate_info(ocr_input_path)
         
-        ocr_time = time.time() - ocr_start
+        # 计算耗时
+        ocr_time = time.time() - ocr_start_time
+        # ==========================
         
-        # 4. 处理OCR结果
-        plate_text = "未知"
-        ocr_confidence = 0.0
-        plate_type = "未知"
+        # 清理临时文件
+        if not temp_plate_path: 
+            try: os.remove(ocr_input_path)
+            except: pass
         
-        if ocr_result:
+        # 解析结果
+        plate_text, ocr_confidence, plate_type = ("未知", 0.0, "未知")
+        if ocr_result: 
             plate_text, ocr_confidence, plate_type = ocr_result
-            print(f"  ✓ 识别成功:")
-            print(f"    车牌号码: {plate_text}")
-            print(f"    车牌类型: {plate_type}")
-            print(f"    识别置信度: {ocr_confidence:.3f}")
-            print(f"    识别耗时: {ocr_time:.2f}s")
-        else:
-            print(f"  ✗ 识别失败")
         
-        # 5. 在原图上绘制结果
+        # 在原图上标注
         annotated_image = self._annotate_plate(
-            original_image.copy(),
-            plate_info['bbox'],
-            plate_text,
-            plate_info['confidence'],
-            ocr_confidence,
+            original_image.copy(), 
+            plate_info['bbox'], 
+            plate_text, 
+            plate_info['confidence'], 
+            ocr_confidence, 
             plate_type
         )
         
-        # 6. 准备结果
+        # 结果打包
         result = {
-            'plate_id': plate_index,
+            'plate_id': plate_index, 
             'detection_confidence': float(plate_info['confidence']),
-            'bbox': plate_info['bbox'],
+            'bbox': plate_info['bbox'], 
             'plate_text': plate_text,
-            'ocr_confidence': float(ocr_confidence),
+            'ocr_confidence': float(ocr_confidence), 
             'plate_type': plate_type,
-            'rectified_image': rectified_image,
-            'preprocessed_image': preprocessed_image,
+            'rectified_image': rectified_image, 
+            'preprocessed_image': final_plate_image, 
             'annotated_image': annotated_image,
-            'ocr_time': float(ocr_time),
+            'ocr_time': ocr_time, # === 修复点：将时间加入结果字典 ===
         }
         
-        # 7. 保存单个车牌结果
-        if save_results:
+        if save_results: 
             self._save_single_result(result, output_dir, plate_index)
-        
+            
         return result
     
     def process_image(self, image_path: str, 
@@ -329,78 +277,51 @@ class LicensePlateSystem:
         
         return all_results
     
-    def _annotate_plate(self, image: np.ndarray, bbox: Tuple, 
-                       plate_text: str, det_conf: float,
-                       ocr_conf: float, plate_type: str) -> np.ndarray:
-        """
-        在原图上标注车牌信息
-        """
+    def _annotate_plate(self, image: np.ndarray, bbox: Tuple, plate_text: str, det_conf: float, ocr_conf: float, plate_type: str) -> np.ndarray:
+        """图片模式的标注 (修复中文乱码)"""
         x1, y1, x2, y2 = bbox
         
-        # 根据车牌类型选择颜色
-        color_map = {
-            '蓝牌': (255, 0, 0),      # 蓝色
-            '黄牌': (0, 255, 255),    # 黄色
-            '新能源绿牌': (0, 255, 0), # 绿色
-            '白牌': (255, 255, 255),  # 白色
-            '黑牌': (0, 0, 0),        # 黑色
-            '白牌 (警用)': (255, 255, 255),  # 白色
-        }
-        
-        if plate_type in color_map:
-            color = color_map[plate_type]
+        # 确定颜色
+        if plate_text != "未知":
+            color_map = {'蓝牌': (255,0,0), '黄牌': (0,255,255), '新能源绿牌': (0,255,0)}
+            color = color_map.get(plate_type, (0, 255, 0))
         else:
-            color = (0, 255, 0) if plate_text != "未知" else (0, 0, 255)
-        
-        # 绘制边界框
+            color = (0, 0, 255) # 红色
+            
+        # 1. 绘制矩形框
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 3)
         
-        # 准备文本信息
-        lines = []
-        if plate_text != "未知":
-            lines.append(f"车牌: {plate_text}")
+        # 2. 准备多行文本
+        lines = [
+            f"车牌: {plate_text}",
+            f"类型: {plate_type}",
+            f"置信度: {ocr_conf:.2f}"
+        ]
         
-        lines.append(f"类型: {plate_type}")
-        lines.append(f"检测: {det_conf:.2f} 识别: {ocr_conf:.2f}")
+        # 3. 绘制文本背景
+        line_height = 25
+        text_area_height = len(lines) * line_height + 10
+        text_area_width = 220 # 估算宽度
         
-        # 计算文本位置
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        thickness = 1
+        # 确定背景位置（优先在上方）
+        bg_y1 = max(0, y1 - text_area_height)
+        bg_y2 = y1
+        if bg_y1 == 0: # 上方空间不足，画在下方
+            bg_y1 = y2
+            bg_y2 = y2 + text_area_height
+            
+        # 画半透明背景
+        overlay = image.copy()
+        cv2.rectangle(overlay, (x1, bg_y1), (x1 + text_area_width, bg_y2), (0, 0, 0), -1)
+        image = cv2.addWeighted(overlay, 0.6, image, 0.4, 0)
         
-        # 计算总文本高度
-        line_heights = []
+        # 4. 循环绘制每一行中文
+        y_offset = bg_y1 + 5
         for line in lines:
-            (text_width, text_height), _ = cv2.getTextSize(line, font, font_scale, thickness)
-            line_heights.append(text_height)
-        
-        total_height = sum(line_heights) + 10 * len(lines)
-        max_width = max([cv2.getTextSize(line, font, font_scale, thickness)[0][0] for line in lines])
-        
-        # 文本背景位置（在车牌上方）
-        bg_x1 = x1
-        bg_y1 = max(0, y1 - total_height - 5)
-        bg_x2 = x1 + max_width + 20
-        bg_y2 = y1 - 5
-        
-        # 如果上方空间不足，放在下方
-        if bg_y1 < 0:
-            bg_y1 = y2 + 5
-            bg_y2 = bg_y1 + total_height
-        
-        # 绘制文本背景
-        cv2.rectangle(image, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
-        cv2.rectangle(image, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 1)
-        
-        # 绘制文本
-        y_offset = bg_y1 + line_heights[0] + 5
-        text_color = (255, 255, 255) if plate_type in ['黄牌', '白牌', '白牌 (警用)'] else (0, 255, 0)
-        
-        for i, line in enumerate(lines):
-            cv2.putText(image, line, (bg_x1 + 10, y_offset), 
-                       font, font_scale, text_color, thickness)
-            y_offset += line_heights[i] + 10
-        
+            # 统一使用白色文字
+            image = self.draw_chinese_text(image, line, (x1 + 5, y_offset), (255, 255, 255), 20)
+            y_offset += line_height
+            
         return image
     
     def _save_comparison(self, before: np.ndarray, after: np.ndarray, 
@@ -572,341 +493,8 @@ class LicensePlateSystem:
         
         print("=" * 60)
         
-    def start_camera_detection(self, 
-                              camera_index: int = 0,
-                              frame_width: int = 1280,
-                              frame_height: int = 720,
-                              fps: int = 30,
-                              detection_interval: int = 10,
-                              output_dir: str = "camera_results"):
-        """
-        启动摄像头实时检测
-        
-        Args:
-            camera_index: 摄像头索引
-            frame_width: 帧宽度
-            frame_height: 帧高度
-            fps: 帧率
-            detection_interval: 检测间隔帧数
-            output_dir: 输出目录
-        """
-        print("=" * 60)
-        print("启动摄像头实时检测模式")
-        print("=" * 60)
-        
-        # 创建输出目录
-        output_path = Path(output_dir)
-        output_path.mkdir(exist_ok=True)
-        
-        # === 新增：定义日志文件 ===
-        log_file_path = output_path / "detection_log.csv"
-        # 如果文件不存在，写入表头
-        if not log_file_path.exists():
-            with open(log_file_path, "w", encoding="utf-8-sig") as f:
-                f.write("时间,车牌号,类型,置信度\n")
-        print(f"日志将保存至: {log_file_path}")
-        # ========================
-        
-        # 打开摄像头
-        cap = cv2.VideoCapture(camera_index)
-        if not cap.isOpened():
-            print(f"错误：无法打开摄像头 {camera_index}")
-            return False
-        
-        # 设置摄像头参数
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
-        cap.set(cv2.CAP_PROP_FPS, fps)
-        
-        # 获取实际参数
-        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = int(cap.get(cv2.CAP_PROP_FPS))
-        
-        print(f"摄像头参数: {actual_width}x{actual_height} @ {actual_fps}fps")
-        print(f"检测间隔: 每{detection_interval}帧检测一次")
-        print("\n控制说明:")
-        print("  Q: 退出")
-        print("  S: 保存当前帧")
-        print("  P: 暂停/继续检测")
-        print("  C: 清空检测结果")
-        print("=" * 60)
-        
-        frame_count = 0
-        detection_count = 0
-        is_paused = False
-        last_detections = []
-        start_time = time.time()
-        
-        try:
-            while True:
-                if not is_paused:
-                    # 读取帧
-                    ret, frame = cap.read()
-                    if not ret:
-                        print("摄像头读取失败")
-                        break
-                    
-                    frame_count += 1
-                    display_frame = frame.copy()
-                    
-                    # 检测车牌
-                    if frame_count % detection_interval == 0:
-                        detection_count += 1
-                        
-                        # 保存临时文件用于检测
-                        temp_path = f"temp_camera_frame_{detection_count}.jpg"
-                        cv2.imwrite(temp_path, frame)
-                        
-                        try:
-                            # 检测车牌
-                            plates_info = self.detector.detect_all_and_rectify(temp_path)
-                            
-                            if plates_info:
-                                for i, plate_info in enumerate(plates_info):
-                                    # 处理检测到的车牌
-                                    result = self._process_camera_detection(frame, plate_info, i)
-                                    # === 新增：只有识别成功才保存到文件 ===
-                                    plate_text = result.get('plate_text', '未知')
-                                    if plate_text != "未知":
-                                        # 获取当前信息
-                                        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                                        p_type = result.get('plate_type', '未知')
-                                        conf = result.get('ocr_confidence', 0)
-                                        
-                                        # 1. 控制台只打印有效的
-                                        print(f"[{current_time}] 🟢 捕获车牌: {plate_text} | {p_type} | conf:{conf:.2f}")
-                                        
-                                        # 2. 写入文件 (追加模式 'a')
-                                        # 为了防止同一秒内重复写入相同车牌，可以加个简单的去重逻辑（可选）
-                                        with open(log_file_path, "a", encoding="utf-8-sig") as f:
-                                            f.write(f"{current_time},{plate_text},{p_type},{conf:.2f}\n")
-                                    # =======================================
 
-                                    last_detections.append({
-                                        'result': result,
-                                        'frame': frame.copy(),
-                                        'timestamp': time.time()
-                                    })
-                                    
-                                    # 限制保存的数量
-                                    if len(last_detections) > 10:
-                                        last_detections.pop(0)
-                                    
-                                    # 显示结果
-                                    if result.get('plate_text') != "未知":
-                                        print(f"检测到车牌: {result['plate_text']} ({result.get('plate_type', '未知')})")
-                        
-                        except Exception as e:
-                            print(f"检测出错: {e}")
-                        
-                        # 清理临时文件
-                        try:
-                            os.remove(temp_path)
-                        except:
-                            pass
-                    
-                    # 显示最近的检测结果
-                    for detection in last_detections:
-                        if time.time() - detection['timestamp'] < 5.0:  # 只显示5秒内的结果
-                            display_frame = self._annotate_camera_frame(display_frame, detection['result'])
-                    
-                    # 计算并显示FPS
-                    elapsed_time = time.time() - start_time
-                    current_fps = frame_count / elapsed_time if elapsed_time > 0 else 0
-                    
-                    # === 修改开始: 使用中文绘制 ===
-                    # 绘制 FPS (黄色)
-                    display_frame = self.draw_chinese_text(display_frame, f"FPS: {current_fps:.1f}", (10, 10), (255, 255, 0), 25)
-                    # 绘制 帧数 (黄色)
-                    display_frame = self.draw_chinese_text(display_frame, f"帧数: {frame_count}", (10, 40), (255, 255, 0), 25)
-                    # 绘制 检测次数 (黄色)
-                    display_frame = self.draw_chinese_text(display_frame, f"检测次数: {detection_count}", (10, 70), (255, 255, 0), 25)
-                    
-                    if is_paused:
-                        center_x = display_frame.shape[1] // 2 - 80
-                        display_frame = self.draw_chinese_text(display_frame, "已暂停", (center_x, 50), (255, 0, 0), 50)
-                    # === 修改结束 ===
-                
-                else:
-                    # 暂停时显示最后一帧
-                    if 'display_frame' in locals():
-                        cv2.putText(display_frame, "已暂停", (display_frame.shape[1]//2-50, 50),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-                
-                # 显示图像
-                cv2.imshow('LPR System - Realtime', display_frame)
-                
-                # 键盘控制
-                key = cv2.waitKey(1) & 0xFF
-                
-                if key == ord('q'):  # 退出
-                    break
-                elif key == ord('s'):  # 保存当前帧
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    filename = output_path / f"snapshot_{timestamp}.jpg"
-                    cv2.imwrite(str(filename), frame)
-                    print(f"已保存截图: {filename}")
-                elif key == ord('p'):  # 暂停/继续
-                    is_paused = not is_paused
-                    print("已暂停" if is_paused else "已继续")
-                elif key == ord('c'):  # 清空检测结果
-                    last_detections.clear()
-                    print("已清空检测结果")
-        
-        except KeyboardInterrupt:
-            print("\n用户中断")
-        except Exception as e:
-            print(f"运行时出错: {e}")
-        finally:
-            cap.release()
-            cv2.destroyAllWindows()
-            
-            # 保存统计信息
-            self._save_camera_statistics(frame_count, detection_count, elapsed_time, output_path)
 
-    def _process_camera_detection(self, frame: np.ndarray, plate_info: Dict, plate_index: int) -> Dict:
-        """处理摄像头检测到的车牌"""
-        result = {
-            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
-            'detection_confidence': plate_info['confidence'],
-            'bbox': plate_info['bbox'],
-            'plate_index': plate_index,
-        }
-        
-        # 获取矫正后的车牌图像
-        rectified_image = plate_info['rectified']
-        if rectified_image is not None and rectified_image.size > 0:
-            # 预处理
-            try:
-                preprocessed_image = rectified_image
-                if self.use_preprocessing:
-                    preprocessed_image, _ = self.preprocessor.preprocess_with_color_recovery(
-                        rectified_image,
-                        detect_plate_region=True
-                    )
-                
-                # 保存临时文件用于OCR
-                temp_path = f"temp_plate_{int(time.time())}_{plate_index}.jpg"
-                cv2.imwrite(temp_path, preprocessed_image)
-                
-                # OCR识别
-                ocr_result = get_license_plate_info(temp_path)
-                
-                if ocr_result:
-                    plate_text, ocr_confidence, plate_type = ocr_result
-                    result.update({
-                        'plate_text': plate_text,
-                        'ocr_confidence': ocr_confidence,
-                        'plate_type': plate_type,
-                        'ocr_success': True,
-                    })
-                else:
-                    result['ocr_success'] = False
-                
-                # 清理临时文件
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-                
-            except Exception as e:
-                result['ocr_success'] = False
-                result['error'] = str(e)
-        else:
-            result['ocr_success'] = False
-        
-        return result
-
-    def _annotate_camera_frame(self, frame: np.ndarray, result: Dict) -> np.ndarray:
-        """在摄像头帧上标注检测结果 (支持中文)"""
-        if 'bbox' not in result:
-            return frame
-        
-        x1, y1, x2, y2 = result['bbox']
-        
-        # 根据OCR结果选择颜色
-        if result.get('ocr_success', False):
-            color = (0, 255, 0)  # 绿色
-            # PIL颜色格式是RGB，OpenCV是BGR，所以这里转换一下给文字用
-            text_color = (0, 255, 0) 
-        else:
-            color = (0, 0, 255)  # 红色
-            text_color = (255, 0, 0)
-        
-        # 绘制边界框 (矩形框还是用OpenCV画比较快)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        
-        # 准备文本信息
-        text_lines = []
-        if 'plate_text' in result and result['plate_text'] != "未知":
-            text_lines.append(f"车牌: {result['plate_text']}")
-            if 'plate_type' in result:
-                text_lines.append(f"类型: {result['plate_type']}")
-            if 'ocr_confidence' in result:
-                text_lines.append(f"置信度: {result['ocr_confidence']:.2f}")
-        
-        text_lines.append(f"检测: {result['detection_confidence']:.2f}")
-        
-        # 计算文本位置和背景
-        font_size = 20
-        line_height = font_size + 5
-        total_height = len(text_lines) * line_height + 10
-        max_width = 200 # 估算宽度
-        
-        # 文本背景位置
-        bg_x1 = x1
-        bg_y1 = max(0, y1 - total_height - 10)
-        bg_x2 = x1 + max_width
-        bg_y2 = y1 - 5
-        
-        # 如果上方空间不足，放在下方
-        if bg_y1 < 0:
-            bg_y1 = y2 + 5
-            bg_y2 = bg_y1 + total_height + 10
-        
-        # 绘制半透明黑色背景
-        # 使用切片方式比cv2.rectangle绘制半透明更快
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
-        alpha = 0.6
-        frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
-        
-        # 绘制边框
-        cv2.rectangle(frame, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 1)
-        
-        # 绘制中文文本
-        y_offset = bg_y1 + 5
-        for line in text_lines:
-            # 文字颜色使用白色，看起来更清晰
-            frame = self.draw_chinese_text(frame, line, (bg_x1 + 5, y_offset), (255, 255, 255), font_size)
-            y_offset += line_height
-        
-        return frame
-    
-    def _save_camera_statistics(self, frame_count, detection_count, elapsed_time, output_path):
-        """保存摄像头统计信息"""
-        stats_file = output_path / "statistics.txt"
-        
-        with open(stats_file, 'w', encoding='utf-8') as f:
-            f.write("=" * 60 + "\n")
-            f.write("车牌识别摄像头检测统计\n")
-            f.write("=" * 60 + "\n\n")
-            
-            f.write(f"统计时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"总运行时间: {elapsed_time:.2f}秒\n")
-            f.write(f"总帧数: {frame_count}\n")
-            f.write(f"检测次数: {detection_count}\n")
-            
-            if elapsed_time > 0:
-                avg_fps = frame_count / elapsed_time
-                f.write(f"平均FPS: {avg_fps:.2f}\n")
-            
-            f.write("\n系统配置:\n")
-            f.write(f"预处理: {'启用' if self.use_preprocessing else '禁用'}\n")
-            f.write(f"检测置信度阈值: {self.detector.conf_threshold}\n")
-        
-        print(f"统计信息已保存: {stats_file}")
 
 def main():
     """主函数"""
@@ -964,8 +552,8 @@ def main():
                        help="NMS IoU阈值（默认: 0.45）")
     
     # 处理参数
-    parser.add_argument("--no-preprocess", action="store_true", 
-                       help="禁用预处理")
+    parser.add_argument("--preprocess", action="store_true", 
+                        help="启用耗时的图像增强 (默认关闭)")
     parser.add_argument("--save-all", action="store_true", 
                        help="保存所有中间结果")
     parser.add_argument("--no-display", action="store_true", 
@@ -1052,7 +640,7 @@ def main():
         system = LicensePlateSystem(
             detection_model_path=args.model,
             detection_conf_threshold=args.conf,
-            use_preprocessing=not args.no_preprocess
+            use_preprocessing=args.preprocess
         )
     except Exception as e:
         print(f"系统初始化失败: {e}")
@@ -1221,7 +809,7 @@ def handle_image_mode(args):
             system = LicensePlateSystem(
                 detection_model_path=args.model,
                 detection_conf_threshold=args.conf,
-                use_preprocessing=not args.no_preprocess
+                use_preprocessing=args.preprocess
             )
             
             # 处理图片
@@ -1274,7 +862,7 @@ def handle_video_mode(args):
             system = LicensePlateSystem(
                 detection_model_path=args.model,
                 detection_conf_threshold=args.conf,
-                use_preprocessing=not args.no_preprocess
+                use_preprocessing=args.preprocess
             )
             
             # 处理视频
@@ -1342,7 +930,7 @@ def handle_camera_mode(args):
         system = LicensePlateSystem(
             detection_model_path=args.model,
             detection_conf_threshold=args.conf,
-            use_preprocessing=not args.no_preprocess
+            use_preprocessing=args.preprocess
         )
         
         # 处理摄像头
@@ -1380,7 +968,7 @@ def handle_batch_mode(args):
             system = LicensePlateSystem(
                 detection_model_path=args.model,
                 detection_conf_threshold=args.conf,
-                use_preprocessing=not args.no_preprocess
+                use_preprocessing=args.preprocess
             )
             
             # 批量处理
@@ -1492,7 +1080,7 @@ def handle_interactive_camera_selection():
                 system = LicensePlateSystem(
                     detection_model_path=args.model,
                     detection_conf_threshold=args.conf,
-                    use_preprocessing=not args.no_preprocess
+                    use_preprocessing=args.preprocess
                 )
                 process_camera_mode(system, args)
             except Exception as e:
@@ -1617,54 +1205,24 @@ def process_image_mode(system, args):
 
 
 def process_camera_mode(system, args):
-    """处理摄像头模式"""
-    print("启动摄像头实时检测...")
+    """处理摄像头模式 (已改为调用 camera_realtime.py)"""
+    print("启动优化版摄像头实时检测...")
     
     try:
-        # 检查摄像头可用性
-        cap = cv2.VideoCapture(args.camera_index)
-        if not cap.isOpened():
-            print(f"错误：无法打开摄像头 {args.camera_index}")
-            
-            # 尝试自动检测可用摄像头
-            print("尝试自动检测可用摄像头...")
-            for i in range(3):
-                test_cap = cv2.VideoCapture(i)
-                if test_cap.isOpened():
-                    print(f"找到可用摄像头: 索引 {i}")
-                    args.camera_index = i
-                    test_cap.release()
-                    cap = cv2.VideoCapture(i)
-                    break
-                test_cap.release()
-            
-            if not cap.isOpened():
-                print("未找到可用摄像头")
-                return
+        # 1. 实例化优化后的检测器
+        detector = RealTimeLicensePlateDetector(
+            model_path=args.model,
+            conf_threshold=args.conf,
+            use_preprocessing=args.preprocess
+        )
         
-        cap.release()
-        
-        # 使用实时检测器
-        print("=" * 60)
-        print("摄像头参数:")
-        print(f"  索引: {args.camera_index}")
-        print(f"  分辨率: {args.frame_width}x{args.frame_height}")
-        print(f"  帧率: {args.fps}fps")
-        print(f"  检测间隔: 每{args.detection_interval}帧检测一次")
-        print("=" * 60)
-        
-        # 创建输出目录
-        camera_output_dir = os.path.join(args.output_dir, "camera")
-        os.makedirs(camera_output_dir, exist_ok=True)
-        
-        # 启动摄像头检测
-        system.start_camera_detection(
+        # 2. 启动摄像头
+        detector.start_camera(
             camera_index=args.camera_index,
+            camera_backend=cv2.CAP_ANY,
             frame_width=args.frame_width,
             frame_height=args.frame_height,
-            fps=args.fps,
-            detection_interval=args.detection_interval,
-            output_dir=camera_output_dir
+            detection_interval=args.detection_interval
         )
         
     except KeyboardInterrupt:
