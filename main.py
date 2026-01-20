@@ -1354,83 +1354,84 @@ def process_image_mode(system, args, parking_manager=None):
 
 # ==========================================
 # 修改：摄像头处理模式
-
 def process_camera_mode(system, args, parking_manager=None):
-    """处理摄像头模式 (支持停车交互)"""
-    print("启动摄像头实时检测 (按 'q' 退出, 识别到车牌后会询问停车操作)...")
+    """处理摄像头模式 (修复退出失效并恢复保存功能)"""
+    print(f"启动摄像头实时检测 (按 'q' 退出)...")
     
+    # 1. 确保输出目录存在
+    camera_output_dir = os.path.join(args.output_dir, "camera")
+    if not os.path.exists(camera_output_dir):
+        os.makedirs(camera_output_dir, exist_ok=True)
+        print(f"创建输出目录: {camera_output_dir}")
+
     cap = cv2.VideoCapture(args.camera_index)
     if not cap.isOpened():
         print(f"错误: 无法打开摄像头 {args.camera_index}")
         return
 
-    # 设置参数
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.frame_width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.frame_height)
-    cap.set(cv2.CAP_PROP_FPS, args.fps)
 
     frame_count = 0
-    detection_interval = args.detection_interval
-    
     try:
         while True:
             ret, frame = cap.read()
-            if not ret:
-                print("无法读取摄像头画面")
-                break
+            if not ret: break
             
             frame_count += 1
             display_frame = frame.copy()
             
             # 定时检测
-            if frame_count % detection_interval == 0:
-                # 保存临时文件用于检测
+            if frame_count % args.detection_interval == 0:
                 temp_path = "temp_cam_frame.jpg"
                 cv2.imwrite(temp_path, frame)
                 
-                # 1. 检测车牌
+                # 检测车牌
                 plates_info = system.detector.detect_all_and_rectify(temp_path)
                 
                 if plates_info:
                     for i, plate_info in enumerate(plates_info):
-                        # 2. 识别车牌
+                        # 识别车牌
                         result = system._process_camera_detection(frame, plate_info, i)
-                        
                         plate_text = result.get('plate_text', '未知')
                         
-                        # 3. 如果识别成功，标注并询问
                         if plate_text != "未知":
-                            # 标注画面
+                            # --- 恢复保存逻辑 ---
+                            timestamp = time.strftime("%Y%m%d_%H%M%S")
+                            save_name = f"{timestamp}_frame{frame_count}_plate{i}.jpg"
+                            save_path = os.path.join(camera_output_dir, save_name)
+                            
+                            # 标注并保存
+                            annotated_frame = system._annotate_camera_frame(frame.copy(), result)
+                            cv2.imwrite(save_path, annotated_frame)
+                            print(f"已保存结果: {save_path}")
+                            # ------------------
+
+                            # 更新实时显示画面
                             display_frame = system._annotate_camera_frame(display_frame, result)
                             cv2.imshow('License Plate System', display_frame)
-                            cv2.waitKey(1) # 刷新显示
+                            cv2.waitKey(1) # 刷新窗口
+                            print("恢复实时画面")
                             
-                            # 暂停并询问用户
                             if parking_manager:
-                                print("\n>>> 暂停实时画面以进行停车操作 <<<")
+                                print(f"\n[检测到车牌: {plate_text}]")
                                 handle_parking_interaction(parking_manager, plate_text)
-                                print(">>> 恢复实时画面 <<<")
                 
-                # 清理
-                try: os.remove(temp_path)
-                except: pass
+                if os.path.exists(temp_path): os.remove(temp_path)
 
             cv2.imshow('License Plate System', display_frame)
             
-            # 按 'q' 退出
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # 捕获退出键
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
                 
-    except KeyboardInterrupt:
-        print("\n用户中断")
     except Exception as e:
-        print(f"摄像头运行出错: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"运行出错: {e}")
     finally:
         cap.release()
         cv2.destroyAllWindows()
-
+        for i in range(5): cv2.waitKey(1)
 
 def test_single_camera(camera_index, test_duration=5):
     # ... (保持原代码不变)
